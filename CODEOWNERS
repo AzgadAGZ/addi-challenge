@@ -1,0 +1,17 @@
+# Platform team owns (devs cannot modify)
+k8s/platform/                          @addi/platform-engineering
+terraform/                             @addi/platform-engineering
+spec/schemas/                          @addi/platform-engineering
+spec/lib/                              @addi/platform-engineering
+scripts/                               @addi/platform-engineering
+.github/workflows/                     @addi/platform-engineering
+CODEOWNERS                             @addi/platform-engineering @addi/security
+
+# Service teams own freely
+k8s/services/*/base/slo.yaml           @addi/service-team-*
+k8s/services/*/overlays/dev/           @addi/service-team-*
+
+# Joint approval required
+k8s/services/*/base/network-policy.yaml  @addi/service-team-* @addi/security
+k8s/services/*/base/rollout.yaml       @addi/service-team-* @addi/platform-engineering
+k8s/services/*/overlays/prod/          @addi/service-team-* @addi/platform-engineering
