@@ -1,0 +1,101 @@
+{{- if or (eq .Values.workloadType "worker") (and (eq .Values.workloadType "api") (eq .Values.rollout.strategy "rolling")) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "addi-workload.fullname" . }}
+  namespace: {{ include "addi-workload.namespace" . }}
+  labels:
+    {{- include "addi-workload.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      {{- include "addi-workload.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        {{- include "addi-workload.selectorLabels" . | nindent 8 }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.port | quote }}
+        prometheus.io/path: "/metrics"
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: {{ .Values.name }}
+          image: {{ .Values.image.repository }}/{{ .Values.name }}:{{ .Values.image.tag }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.port }}
+              protocol: TCP
+          {{- if .Values.env }}
+          env:
+            {{- range $key, $val := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $val | quote }}
+            {{- end }}
+          {{- end }}
+          {{- if .Values.secrets }}
+          envFrom:
+            - secretRef:
+                name: {{ include "addi-workload.fullname" . }}-secrets
+          {{- end }}
+          {{- if .Values.command }}
+          command: {{ toJson .Values.command }}
+          {{- end }}
+          {{- if .Values.args }}
+          args: {{ toJson .Values.args }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: {{ .Values.healthCheck.path }}
+              port: http
+            failureThreshold: {{ .Values.healthCheck.startupProbe.failureThreshold }}
+            periodSeconds: {{ .Values.healthCheck.startupProbe.periodSeconds }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.healthCheck.livenessProbe.path }}
+              port: http
+            periodSeconds: {{ .Values.healthCheck.livenessProbe.periodSeconds }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.healthCheck.readinessProbe.path }}
+              port: http
+            periodSeconds: {{ .Values.healthCheck.readinessProbe.periodSeconds }}
+          securityContext:
+            runAsNonRoot: {{ .Values.securityContext.runAsNonRoot }}
+            readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
+            allowPrivilegeEscalation: {{ .Values.securityContext.allowPrivilegeEscalation }}
+            capabilities:
+              drop: {{ .Values.securityContext.capabilities.drop | toJson }}
+      securityContext:
+        seccompProfile:
+          type: {{ .Values.securityContext.seccompProfile.type }}
+      {{- if .Values.spot }}
+      tolerations:
+        - key: "kubernetes.azure.com/scalesetpriority"
+          operator: "Equal"
+          value: "spot"
+          effect: "NoSchedule"
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: "kubernetes.azure.com/scalesetpriority"
+                    operator: In
+                    values:
+                      - "spot"
+      {{- end }}
+      {{- if .Values.priorityClass }}
+      priorityClassName: {{ .Values.priorityClass }}
+      {{- end }}
+{{- end }}

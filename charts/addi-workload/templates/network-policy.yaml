@@ -1,0 +1,50 @@
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "addi-workload.fullname" . }}
+  namespace: {{ include "addi-workload.namespace" . }}
+  labels:
+    {{- include "addi-workload.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "addi-workload.selectorLabels" . | nindent 6 }}
+  ingress:
+    {{- if eq .Values.workloadType "api" }}
+    - fromCIDR:
+        - {{ .Values.networking.ingressCIDR | quote }}
+      toPorts:
+        - ports:
+            - port: {{ .Values.port | quote }}
+              protocol: TCP
+    {{- end }}
+  egress:
+    # Allow DNS resolution via kube-dns
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s:app.kubernetes.io/name: coredns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # Allow egress to AWS Secrets Manager
+    - toFQDNs:
+        - matchPattern: "*.secretsmanager.*.amazonaws.com"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+    {{- range .Values.networking.dependencies }}
+    # Allow egress to dependency: {{ .name }}
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .namespace }}
+            app: {{ .name }}
+      toPorts:
+        - ports:
+            - port: {{ .port | default "8080" | quote }}
+              protocol: TCP
+    {{- end }}

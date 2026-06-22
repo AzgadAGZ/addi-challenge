@@ -1,0 +1,5 @@
+apiVersion: v2
+name: addi-workload
+description: Shared workload chart for Addi platform services
+version: 0.1.0
+appVersion: "1.0.0"

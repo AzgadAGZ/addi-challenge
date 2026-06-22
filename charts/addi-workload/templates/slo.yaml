@@ -1,0 +1,57 @@
+{{- if .Values.slo.enabled }}
+apiVersion: sloth.slok.dev/v1
+kind: PrometheusServiceLevel
+metadata:
+  name: {{ include "addi-workload.fullname" . }}
+  namespace: {{ include "addi-workload.namespace" . }}
+  labels:
+    {{- include "addi-workload.labels" . | nindent 4 }}
+spec:
+  service: {{ include "addi-workload.fullname" . }}
+  labels:
+    app: {{ .Values.name }}
+  slos:
+    - name: availability
+      objective: {{ .Values.slo.availability }}
+      description: "Availability SLO for {{ .Values.name }}"
+      sli:
+        events:
+          errorQuery: >-
+            sum(rate(http_requests_total{job="{{ .Values.name }}", code=~"5.."}[{{"{{"}}window{{"}}"}}]))
+          totalQuery: >-
+            sum(rate(http_requests_total{job="{{ .Values.name }}"}[{{"{{"}}window{{"}}"}}]))
+      alerting:
+        name: {{ .Values.name }}HighErrorRate
+        labels:
+          category: availability
+        annotations:
+          summary: "High error rate on {{ .Values.name }}"
+        pageAlert:
+          labels:
+            severity: critical
+        ticketAlert:
+          labels:
+            severity: warning
+    - name: latency-p99
+      objective: {{ .Values.slo.latencyObjective }}
+      description: "Latency P99 SLO for {{ .Values.name }} ({{ .Values.slo.latencyP99Ms }}ms)"
+      sli:
+        events:
+          errorQuery: >-
+            sum(rate(http_request_duration_seconds_count{job="{{ .Values.name }}"}[{{"{{"}}window{{"}}"}}]))
+            - sum(rate(http_request_duration_seconds_bucket{job="{{ .Values.name }}", le="{{ divf .Values.slo.latencyP99Ms 1000 }}"}[{{"{{"}}window{{"}}"}}]))
+          totalQuery: >-
+            sum(rate(http_request_duration_seconds_count{job="{{ .Values.name }}"}[{{"{{"}}window{{"}}"}}]))
+      alerting:
+        name: {{ .Values.name }}HighLatency
+        labels:
+          category: latency
+        annotations:
+          summary: "High P99 latency on {{ .Values.name }}"
+        pageAlert:
+          labels:
+            severity: critical
+        ticketAlert:
+          labels:
+            severity: warning
+{{- end }}

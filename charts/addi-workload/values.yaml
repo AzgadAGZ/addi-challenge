@@ -1,0 +1,95 @@
+name: ""
+domain: ""
+owner: ""
+language: go
+
+workloadType: api  # api | worker | cronjob | job
+
+image:
+  repository: ghcr.io/addi
+  tag: PLACEHOLDER
+
+replicas: 1
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+port: 8080
+protocol: http
+
+exposure: private  # private | cloudfront | public
+
+healthCheck:
+  path: /healthz
+  startupProbe:
+    failureThreshold: 30
+    periodSeconds: 5
+  livenessProbe:
+    path: /livez
+    periodSeconds: 10
+  readinessProbe:
+    path: /readyz
+    periodSeconds: 5
+
+rollout:
+  strategy: rolling  # rolling | canary | blue-green
+  canary:
+    steps:
+      - weight: 10
+        pause: 5m
+      - weight: 50
+        pause: 5m
+      - weight: 100
+    analysisTemplate: canary-health
+  blueGreen:
+    autoPromotionEnabled: false
+    autoPromotionSeconds: 0
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPU: 70
+
+pdb:
+  enabled: true  # auto-disabled when replicas < 2
+  minAvailable: 1
+
+networking:
+  dependencies: []
+  ingressCIDR: "10.0.0.0/16"
+
+secrets: []
+
+slo:
+  enabled: false
+  availability: 99.95
+  latencyObjective: 99.9
+  latencyP99Ms: 500
+
+env: {}
+
+dataClassification: internal  # public | internal | confidential | restricted
+
+spot: false
+priorityClass: ""
+
+# CronJob specific
+schedule: ""
+activeDeadlineSeconds: 3600
+backoffLimit: 2
+
+# Security (hardened defaults)
+securityContext:
+  runAsNonRoot: true
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  seccompProfile:
+    type: RuntimeDefault
+  capabilities:
+    drop: ["ALL"]

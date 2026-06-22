@@ -1,0 +1,18 @@
+{{- if ne .Values.workloadType "cronjob" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "addi-workload.fullname" . }}
+  namespace: {{ include "addi-workload.namespace" . }}
+  labels:
+    {{- include "addi-workload.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "addi-workload.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}
