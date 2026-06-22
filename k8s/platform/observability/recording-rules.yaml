@@ -1,0 +1,98 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: addi-golden-signals
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: addi-golden-signals
+    app.kubernetes.io/managed-by: platform-engineering
+    addi.com/tier: platform
+    # Mimir picks up rules with this label
+    prometheus: mimir
+    role: alert-rules
+  annotations:
+    addi.com/description: |
+      Golden Signal recording rules for all Addi services.
+      Four signals: request rate, error rate, p99 latency, saturation.
+      Used by: Grafana dashboards, SLO burn-rate calculations, Kargo gates.
+      Rules pre-aggregate to 5m intervals for query performance at 1000-service scale.
+spec:
+  groups:
+    - name: addi.golden_signals.5m
+      interval: 30s
+      rules:
+        # RED: Request Rate - how many requests/second per service
+        - record: addi:http:request_rate:5m
+          expr: |
+            sum by (service, namespace, environment) (
+              rate(http_requests_total[5m])
+            )
+          labels:
+            signal: request_rate
+            window: 5m
+
+        # RED: Error Rate - fraction of 5xx responses per service
+        - record: addi:http:error_rate:5m
+          expr: |
+            sum by (service, namespace, environment) (
+              rate(http_requests_total{status=~"5.."}[5m])
+            )
+            /
+            sum by (service, namespace, environment) (
+              rate(http_requests_total[5m])
+            )
+          labels:
+            signal: error_rate
+            window: 5m
+
+        # RED: Duration (p99 Latency) - 99th percentile latency per service
+        - record: addi:http:latency_p99:5m
+          expr: |
+            histogram_quantile(
+              0.99,
+              sum by (service, namespace, environment, le) (
+                rate(http_request_duration_seconds_bucket[5m])
+              )
+            )
+          labels:
+            signal: latency_p99
+            window: 5m
+
+        # USE: Saturation - CPU utilization as proxy for container saturation
+        - record: addi:container:saturation:5m
+          expr: |
+            sum by (service, namespace, environment) (
+              rate(container_cpu_usage_seconds_total{
+                container!="",
+                container!="POD"
+              }[5m])
+            )
+            /
+            sum by (service, namespace, environment) (
+              kube_pod_container_resource_limits{
+                resource="cpu",
+                container!=""
+              }
+            )
+          labels:
+            signal: saturation
+            window: 5m
+
+    # Availability recording rule (for SLO compliance calculations)
+    - name: addi.availability.5m
+      interval: 30s
+      rules:
+        - record: addi:http:availability:5m
+          expr: |
+            1 - (
+              sum by (service, namespace, environment) (
+                rate(http_requests_total{status=~"5.."}[5m])
+              )
+              /
+              sum by (service, namespace, environment) (
+                rate(http_requests_total[5m])
+              )
+            )
+          labels:
+            signal: availability
+            window: 5m

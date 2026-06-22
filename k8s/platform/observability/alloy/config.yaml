@@ -1,0 +1,227 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-config
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/component: collector
+    app.kubernetes.io/managed-by: platform-engineering
+data:
+  config.alloy: |
+    // =========================================================
+    // Grafana Alloy - Unified Observability Agent Config
+    // Addi Platform | 1000+ microservices
+    // =========================================================
+    // Signals:
+    //   Metrics  -> Mimir (remote_write)
+    //   Logs     -> Loki (loki.write)
+    //   Traces   -> Tempo (otlphttp)
+    // PII Redaction:
+    //   - Colombian cédula de ciudadanía (8-10 digit ID)
+    //   - Payment card numbers (PAN, 13-19 digits)
+    //   - Email addresses
+    // =========================================================
+
+    // --- METRICS: Prometheus scrape -> Mimir ---
+
+    prometheus.scrape "kubernetes_pods" {
+      targets = discovery.kubernetes.pods.targets
+
+      scrape_interval = "15s"
+      scrape_timeout  = "10s"
+
+      honor_labels = true
+
+      forward_to = [prometheus.remote_write.mimir.receiver]
+    }
+
+    discovery.kubernetes "pods" {
+      role = "pod"
+
+      namespaces {
+        own_namespace = false
+      }
+
+      selectors {
+        role  = "pod"
+        label = "prometheus.io/scrape=true"
+      }
+    }
+
+    prometheus.scrape "kubernetes_nodes" {
+      targets = discovery.kubernetes.nodes.targets
+
+      scheme     = "https"
+      tls_config {
+        ca_file              = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+        insecure_skip_verify = false
+      }
+      bearer_token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+      relabeling_rules {
+        // Node exporter metrics
+        rule {
+          action        = "labelmap"
+          regex         = "__meta_kubernetes_node_label_(.+)"
+        }
+        rule {
+          target_label = "__address__"
+          replacement  = "kubernetes.default.svc:443"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_node_name"]
+          regex         = "(.+)"
+          target_label  = "__metrics_path__"
+          replacement   = "/api/v1/nodes/$1/proxy/metrics"
+        }
+      }
+
+      forward_to = [prometheus.remote_write.mimir.receiver]
+    }
+
+    discovery.kubernetes "nodes" {
+      role = "node"
+    }
+
+    prometheus.remote_write "mimir" {
+      endpoint {
+        url = env("MIMIR_ENDPOINT") + "/api/v1/push"
+        headers = {
+          "X-Scope-OrgID" = "addi",
+        }
+      }
+
+      queue_config {
+        capacity             = 10000
+        max_shards           = 50
+        max_samples_per_send = 2000
+        batch_send_deadline  = "5s"
+      }
+    }
+
+    // --- LOGS: Journal + container logs -> Loki (with PII redaction) ---
+
+    loki.source.journal "system" {
+      path          = "/var/log/journal"
+      forward_to    = [loki.process.pii_redact.receiver]
+      relabeling_rules {
+        rule {
+          source_labels = ["__journal__systemd_unit"]
+          target_label  = "unit"
+        }
+        rule {
+          source_labels = ["__journal__hostname"]
+          target_label  = "hostname"
+        }
+      }
+    }
+
+    loki.source.kubernetes "pods" {
+      targets    = discovery.kubernetes.pods_for_logs.targets
+      forward_to = [loki.process.pii_redact.receiver]
+    }
+
+    discovery.kubernetes "pods_for_logs" {
+      role = "pod"
+
+      selectors {
+        role = "pod"
+      }
+    }
+
+    // PII Redaction Pipeline (SFC Ley 1581/2012 + PCI DSS)
+    loki.process "pii_redact" {
+      // Colombian cédula de ciudadanía: 8-10 digits, optionally with dots
+      // e.g. 1.234.567.890 or 1234567890
+      // Formatted cédulas: 1.234.567.890 or 12.345.678 (dot-separated groups)
+      stage.replace {
+        expression = "(\\b\\d{1,2}\\.\\d{3}\\.\\d{3}\\.?\\d{0,3}\\b)"
+        replace     = "[REDACTED_CEDULA]"
+      }
+
+      // Unformatted cédulas: match only in field context (cedula, documento, cc, identity_number)
+      // Contextual pattern reduces false positives vs. bare digit sequence matching
+      stage.replace {
+        expression = "((?:cedula|documento|cc|identity_number|document_number)[\"':=\\s]+\\d{6,10})"
+        replace     = "[REDACTED_CEDULA]"
+      }
+
+      // Payment card numbers (PAN): 13-19 digit sequences
+      // Luhn-valid patterns - regex approximation for log scrubbing
+      stage.replace {
+        expression = "\\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|6(?:011|5[0-9]{2})[0-9]{12}|[0-9]{13,19})\\b"
+        replace     = "[REDACTED_CARD]"
+      }
+
+      // Email addresses
+      stage.replace {
+        expression = "[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}"
+        replace     = "[REDACTED_EMAIL]"
+      }
+
+      // Colombian NIT (tax ID): NNN.NNN.NNN-D (9 digits + check digit, dot-separated)
+      stage.replace {
+        expression = "(\\b\\d{3}\\.\\d{3}\\.\\d{3}-\\d{1}\\b)"
+        replace     = "[REDACTED_NIT]"
+      }
+
+      // Add cluster/node labels
+      stage.labels {
+        values = {
+          node      = "",
+          namespace = "",
+          pod       = "",
+          container = "",
+        }
+      }
+
+      forward_to = [loki.write.loki.receiver]
+    }
+
+    loki.write "loki" {
+      endpoint {
+        url = env("LOKI_ENDPOINT") + "/loki/api/v1/push"
+        tenant_id = "addi"
+      }
+    }
+
+    // --- TRACES: OTel receiver -> Tempo ---
+
+    otelcol.receiver.otlp "default" {
+      grpc {
+        endpoint = "0.0.0.0:4317"
+      }
+      http {
+        endpoint = "0.0.0.0:4318"
+      }
+
+      output {
+        traces = [otelcol.processor.batch.default.input]
+      }
+    }
+
+    otelcol.processor.batch "default" {
+      timeout             = "5s"
+      send_batch_size     = 1024
+      send_batch_max_size = 2048
+
+      output {
+        traces = [otelcol.exporter.otlphttp.tempo.input]
+      }
+    }
+
+    otelcol.exporter.otlphttp "tempo" {
+      client {
+        endpoint = env("TEMPO_ENDPOINT")
+        tls {
+          insecure = true
+        }
+      }
+    }
+
+    // --- SELF-MONITORING ---
+
+    prometheus.scrape "alloy_self" {
+      targets = [{"__address__" = "127.0.0.1:12345"}]
+      forward_to = [prometheus.remote_write.mimir.receiver]
+    }

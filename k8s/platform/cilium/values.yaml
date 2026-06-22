@@ -1,0 +1,113 @@
+# Cilium CNI - Helm values
+# EKS deployment: kubeProxyReplacement=true (eBPF, no iptables)
+# mTLS: Cilium-managed, sidecar-free, auto-rotation every 720h
+# Hubble: metrics only - dashboards in Grafana (no UI pod)
+
+# eBPF kube-proxy replacement
+kubeProxyReplacement: "true"
+k8sServiceHost: "auto"
+k8sServicePort: "443"
+
+# High availability
+operator:
+  replicas: 3
+  rollOutPods: true
+
+# DaemonSet rolling update
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 1
+
+# Service mesh (L7 policies, mTLS)
+serviceMesh:
+  enabled: true
+  proxy: none  # sidecar-free (Cilium in-kernel)
+
+# mTLS - Cilium-managed certificates (SFC CE 007/2018)
+encryption:
+  enabled: true
+  type: wireguard
+  wireguard:
+    userspaceFallback: false
+
+mtls:
+  enabled: true
+  certProvider: cilium
+  rotationInterval: 720h
+
+# Network policy - strict default-deny
+policyEnforcementMode: "always"
+enableIPv4: true
+enableIPv6: false
+
+# Hubble observability (metrics to Grafana, no UI)
+hubble:
+  enabled: true
+  metrics:
+    enabled:
+      - dns:query;ignoreAAAA
+      - drop
+      - tcp
+      - flow
+      - port-distribution
+      - icmp
+      - http
+    serviceMonitor:
+      enabled: true
+    dashboards:
+      enabled: true
+      namespace: observability
+  relay:
+    enabled: true
+    replicas: 2
+    rollOutPods: true
+    prometheus:
+      enabled: true
+      serviceMonitor:
+        enabled: true
+  ui:
+    enabled: false  # Using Grafana dashboards instead
+
+# BPF configuration for performance
+bpf:
+  masquerade: true
+  preallocateMaps: false
+  lbExternalClusterIP: true
+  tproxy: true
+
+# IPAM - EKS VPC CNI compatible
+ipam:
+  # NOTE: ipam.mode: eni is the TARGET STATE (post-migration).
+  # During Phase 1 (hybrid with existing vpc-cni), use:
+  #   ipam.mode: cluster-pool
+  # Switch to eni AFTER vpc-cni addon is fully removed.
+  # See: README.md Migration Strategy Phase 1
+  mode: eni
+  eni:
+    awsEnablePrefixDelegation: true
+    subnetTagsFilter:
+      "kubernetes.io/role/internal-elb": "1"
+
+# Resource limits (1000-service scale)
+resources:
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+  requests:
+    cpu: 250m
+    memory: 512Mi
+
+# Monitoring
+prometheus:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+
+# RBAC
+rbac:
+  create: true
+
+# Tolerations - run on all nodes including masters
+tolerations:
+  - operator: Exists

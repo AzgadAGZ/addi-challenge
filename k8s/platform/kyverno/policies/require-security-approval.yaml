@@ -1,0 +1,69 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-security-approval
+  labels:
+    app.kubernetes.io/managed-by: platform-engineering
+    addi.com/tier: platform
+    addi.com/compliance: "sfc-decreto-2555"
+  annotations:
+    policies.kyverno.io/title: Require Security Approval for Public-Facing Ingress
+    policies.kyverno.io/category: Governance
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: |
+      Public-facing Ingress resources (exposure=cloudfront or exposure=public)
+      require explicit security team approval: label addi.com/security-approved=true.
+      Implements SFC Decreto 2555 segregation of duties:
+      developers cannot unilaterally expose services to the internet.
+      Belt-and-suspenders alongside CODEOWNERS PR review.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    # Block public-facing Ingress without security approval
+    - name: require-security-approval-for-public-ingress
+      match:
+        any:
+          - resources:
+              kinds:
+                - Ingress
+              annotations:
+                addi.com/exposure: cloudfront
+          - resources:
+              kinds:
+                - Ingress
+              annotations:
+                addi.com/exposure: public
+      validate:
+        message: |
+          Public-facing Ingress requires security team approval.
+          Add label: addi.com/security-approved=true
+          Open a security review request in Plane and get approval before exposing services.
+        pattern:
+          metadata:
+            labels:
+              addi.com/security-approved: "true"
+
+    # Block HTTPRoute for public exposure without approval (Gateway API)
+    - name: require-security-approval-for-public-httproute
+      match:
+        any:
+          - resources:
+              kinds:
+                - HTTPRoute
+              annotations:
+                addi.com/exposure: cloudfront
+          - resources:
+              kinds:
+                - HTTPRoute
+              annotations:
+                addi.com/exposure: public
+      validate:
+        message: |
+          Public-facing HTTPRoute requires security team approval.
+          Add label: addi.com/security-approved=true
+          Contact security team via #security-reviews Slack channel.
+        pattern:
+          metadata:
+            labels:
+              addi.com/security-approved: "true"

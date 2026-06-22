@@ -1,0 +1,65 @@
+# Helm values for OWASP Dependency-Track
+# Deployment configuration for the community chart: dependencytrack/dependency-track
+# This file configures the Dependency-Track deployment with both API server and frontend components
+
+replicaCount: 1
+
+# API Server configuration
+apiServer:
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2Gi
+    limits:
+      cpu: 2
+      memory: 4Gi
+
+  # Persistent Volume for API Server data storage
+  persistentVolume:
+    enabled: true
+    size: 20Gi
+
+# Frontend configuration
+frontend:
+  enabled: true
+  replicaCount: 1
+
+# PostgreSQL configuration
+postgresql:
+  enabled: true
+  auth:
+    database: dtrack
+    # Note: PostgreSQL credentials are managed via ExternalSecret
+    # The ExternalSecret resource fetches username and password from a secure
+    # external source (e.g., AWS Secrets Manager, HashiCorp Vault) and injects
+    # them into the deployment. This prevents credentials from being stored
+    # directly in the Helm chart or committed to version control.
+  primary:
+    persistence:
+      size: 10Gi
+
+# OIDC (OpenID Connect) configuration
+# Enables authentication integration with the Addi platform's identity provider
+oidc:
+  enabled: true
+  issuer: "https://auth.addi.com"
+  clientId: "dependency-track"
+
+# CI Pipeline Integration
+# The Dependency-Track API supports receiving Software Bill of Materials (SBOM) data
+# from CI/CD pipelines for automated vulnerability tracking and compliance reporting.
+#
+# Endpoint: POST /api/v1/bom
+# Content-Type: multipart/form-data
+# Payload: CycloneDX JSON format SBOM file
+#
+# Example Usage in CI Pipeline:
+#   curl -X POST https://dependency-track.addi.com/api/v1/bom \
+#     -H "X-Api-Key: <api-key>" \
+#     -F "bom=@cyclonedx.json" \
+#     -F "autoCreate=true" \
+#     -F "projectName=<project-name>" \
+#     -F "projectVersion=<version>"
+#
+# This enables automated SBOM submission during build/release phases for
+# continuous vulnerability assessment and software composition analysis (SCA).

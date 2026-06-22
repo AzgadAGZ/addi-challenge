@@ -1,0 +1,190 @@
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Project
+metadata:
+  name: addi
+  namespace: kargo
+  labels:
+    app.kubernetes.io/managed-by: platform-engineering
+    addi.com/tier: platform
+spec:
+  promotionPolicies:
+    # Dev - auto-promote on new freight
+    - stage: dev
+      autoPromotionEnabled: true
+
+    # Staging - auto-promote after 4hr soak (see Stage spec for gate)
+    - stage: staging
+      autoPromotionEnabled: true
+
+    # Production - MANUAL only (Decreto 2555: change management)
+    - stage: prod
+      autoPromotionEnabled: false
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Stage
+metadata:
+  name: dev
+  namespace: addi
+  labels:
+    addi.com/environment: dev
+spec:
+  requestedFreight:
+    - origin:
+        kind: Warehouse
+        name: addi-services
+      sources:
+        direct: true
+
+  promotionTemplate:
+    spec:
+      vars:
+        - name: repoURL
+          value: https://github.com/addi/addi-platform.git
+        - name: configArtifact
+          value: ghcr.io/addi/addi-configs
+        - name: serviceName
+          value: ${{ imageFrom(vars.image).Repository | base }}
+        # Full image repo path required by imageFrom(). In production this is
+        # parameterized per-service via ApplicationSet - e.g. ghcr.io/addi/payments-api.
+        - name: image
+          value: ghcr.io/addi/payments-api
+        - name: region
+          value: dev-us-east-1
+      steps:
+        - task:
+            name: promote-with-config
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Stage
+metadata:
+  name: staging
+  namespace: addi
+  labels:
+    addi.com/environment: staging
+spec:
+  requestedFreight:
+    - origin:
+        kind: Warehouse
+        name: addi-services
+      sources:
+        stages:
+          - dev
+
+  # 4-hour soak verification (health gates)
+  verifications:
+    - analysisTemplateRef:
+        name: staging-soak
+        namespace: addi
+
+  promotionTemplate:
+    spec:
+      vars:
+        - name: repoURL
+          value: https://github.com/addi/addi-platform.git
+        - name: configArtifact
+          value: ghcr.io/addi/addi-configs
+        - name: serviceName
+          value: ${{ imageFrom(vars.image).Repository | base }}
+        # Full image repo path required by imageFrom(). In production this is
+        # parameterized per-service via ApplicationSet - e.g. ghcr.io/addi/payments-api.
+        - name: image
+          value: ghcr.io/addi/payments-api
+        - name: region
+          value: staging-us-east-1
+      steps:
+        - task:
+            name: promote-with-config
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Stage
+metadata:
+  name: prod
+  namespace: addi
+  labels:
+    addi.com/environment: prod
+    addi.com/requires-approval: "true"
+spec:
+  requestedFreight:
+    - origin:
+        kind: Warehouse
+        name: addi-services
+      sources:
+        stages:
+          - staging
+
+  # Production: manual approval + AnalysisRun via Argo Rollouts canary
+  verifications:
+    - analysisTemplateRef:
+        name: canary-health
+        namespace: addi
+
+  promotionTemplate:
+    spec:
+      vars:
+        - name: repoURL
+          value: https://github.com/addi/addi-platform.git
+        - name: configArtifact
+          value: ghcr.io/addi/addi-configs
+        - name: serviceName
+          value: ${{ imageFrom(vars.image).Repository | base }}
+        # Full image repo path required by imageFrom(). In production this is
+        # parameterized per-service via ApplicationSet - e.g. ghcr.io/addi/payments-api.
+        - name: image
+          value: ghcr.io/addi/payments-api
+        - name: region
+          value: prod-us-east-1
+      steps:
+        - task:
+            name: promote-with-config
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: PromotionTask
+metadata:
+  name: promote-with-config
+  namespace: addi
+spec:
+  vars:
+    - name: repoURL
+    - name: configArtifact
+    - name: serviceName
+    - name: image
+    - name: region
+  steps:
+    - uses: git-clone
+      as: clone
+      config:
+        repoURL: ${{ vars.repoURL }}
+        checkout:
+          - branch: main
+            path: ./src
+    - uses: oci-download
+      as: download-config
+      config:
+        imageRef: ${{ vars.configArtifact }}:${{ vars.serviceName }}-${{ imageFrom(vars.image).Tag }}-${{ vars.region }}
+        outPath: ./downloaded-values.yaml
+    - uses: copy
+      as: apply-config
+      config:
+        inPath: ./downloaded-values.yaml
+        outPath: ./src/k8s/services/${{ vars.serviceName }}/overlays/${{ ctx.stage }}/values.yaml
+    - uses: yaml-update
+      as: update-image
+      config:
+        path: ./src/k8s/services/${{ vars.serviceName }}/overlays/${{ ctx.stage }}/values.yaml
+        updates:
+          - key: image.tag
+            value: ${{ imageFrom(vars.image).Tag }}
+    - uses: git-commit
+      as: commit
+      config:
+        path: ./src
+        message: "promote(${{ vars.serviceName }}): ${{ imageFrom(vars.image).Tag }} -> ${{ ctx.stage }}"
+    - uses: git-push
+      as: push
+      config:
+        path: ./src
+    - uses: argocd-update
+      as: sync
+      config:
+        apps:
+          - name: ${{ vars.serviceName }}-${{ ctx.stage }}

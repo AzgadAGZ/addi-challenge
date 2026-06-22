@@ -1,0 +1,60 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: canary-health
+  namespace: addi
+  labels:
+    app.kubernetes.io/managed-by: platform-engineering
+    addi.com/tier: platform
+  annotations:
+    addi.com/description: |
+      Validates canary health via Prometheus golden signals.
+      Gates: error rate < 5% AND p99 latency < 500ms.
+      Used in all production canary rollouts - parameterized by service name.
+spec:
+  args:
+    - name: service
+      # Provided by Rollout at runtime: {{args.service}}
+    - name: namespace
+      value: default
+
+  metrics:
+    # Gate 1: Error rate < 5% (RED metric)
+    - name: error-rate
+      interval: 1m
+      count: 5
+      failureLimit: 2
+      successCondition: result[0] < 0.05
+      provider:
+        prometheus:
+          address: http://mimir-query-frontend.observability.svc.cluster.local:8080/prometheus
+          query: |
+            (
+              sum(rate(http_requests_total{
+                service="{{args.service}}",
+                namespace="{{args.namespace}}",
+                status=~"5.."
+              }[5m]))
+              /
+              sum(rate(http_requests_total{
+                service="{{args.service}}",
+                namespace="{{args.namespace}}"
+              }[5m]))
+            ) OR on() vector(0)
+
+    # Gate 2: p99 latency < 500ms (RED metric - Duration)
+    - name: latency-p99
+      interval: 1m
+      count: 5
+      failureLimit: 2
+      successCondition: result[0] < 0.5
+      provider:
+        prometheus:
+          address: http://mimir-query-frontend.observability.svc.cluster.local:8080/prometheus
+          query: |
+            histogram_quantile(0.99,
+              sum(rate(http_request_duration_seconds_bucket{
+                service="{{args.service}}",
+                namespace="{{args.namespace}}"
+              }[5m])) by (le)
+            )

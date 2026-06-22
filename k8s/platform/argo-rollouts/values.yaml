@@ -1,0 +1,52 @@
+# Argo Rollouts - Helm values
+# Progressive delivery controller for canary + blue-green strategies
+# All 1000+ services use Rollout instead of Deployment
+
+controller:
+  replicas: 2
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      namespace: observability
+
+  # Leader election for HA
+  leaderElection:
+    enabled: true
+
+  # Traefik/Cilium integration for traffic splitting
+  trafficRouterPlugins: {}
+
+# Dashboard - internal only
+dashboard:
+  enabled: true
+  replicas: 1
+  service:
+    type: ClusterIP
+    port: 3100
+  resources:
+    limits:
+      cpu: 200m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  # Access via kubectl port-forward or private ingress
+  ingress:
+    enabled: false
+
+# RBAC
+clusterInstall: true
+installCRDs: true
+
+# Notifications integration (Slack on rollout events)
+notifications:
+  secret:
+    create: false  # Managed by ExternalSecrets

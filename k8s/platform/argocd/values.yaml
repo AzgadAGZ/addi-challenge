@@ -1,0 +1,139 @@
+# ArgoCD - HA Helm values
+# Hub ArgoCD for GitOps - all 1000+ services
+# OIDC: placeholder for Google Workspace / Okta
+# Resource tracking: annotation-based (avoids label pollution)
+
+global:
+  domain: argocd.internal.addi.com
+  image:
+    tag: "v2.12.0"
+
+# HA configuration - 3 replicas for all stateful components
+controller:
+  replicas: 3
+  resources:
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+
+server:
+  replicas: 3
+  autoscaling:
+    enabled: false
+  ingress:
+    enabled: false  # Internal only - accessed via kubectl port-forward or private ingress
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+repoServer:
+  replicas: 3
+  autoscaling:
+    enabled: false
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 250m
+      memory: 256Mi
+
+applicationSet:
+  replicas: 2
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+
+redis-ha:
+  enabled: true
+  haproxy:
+    enabled: true
+    replicas: 3
+  redis:
+    resources:
+      limits:
+        cpu: 200m
+        memory: 256Mi
+      requests:
+        cpu: 50m
+        memory: 64Mi
+
+# ArgoCD configuration
+configs:
+  # Resource tracking via annotations (avoids label conflicts with HPA, Kyverno)
+  cm:
+    application.resourceTrackingMethod: annotation
+    # Auto-prune and self-heal defaults
+    resource.customizations.health.argoproj.io/Application: |
+      hs = {}
+      hs.status = "Progressing"
+      if obj.status ~= nil then
+        if obj.status.health ~= nil then
+          hs.status = obj.status.health.status
+          if obj.status.health.message ~= nil then
+            hs.message = obj.status.health.message
+          end
+        end
+      end
+      return hs
+    # OIDC - Google Workspace / Okta (configure values at deploy time)
+    oidc.config: |
+      name: SSO
+      issuer: https://accounts.google.com
+      clientID: $argocd-sso-secret:clientID
+      clientSecret: $argocd-sso-secret:clientSecret
+      requestedScopes:
+        - openid
+        - profile
+        - email
+        - groups
+      requestedIDTokenClaims:
+        groups:
+          essential: true
+
+    # RBAC using IdP groups
+    policy.default: role:readonly
+
+  rbac:
+    # Platform team - admin
+    # Service teams - per-project access
+    policy.csv: |
+      g, addi:platform-engineering, role:admin
+      g, addi:security, role:admin
+      g, addi:service-teams, role:readonly
+    policy.default: role:readonly
+
+  # Kargo integration - allow Kargo SA to update Application status
+  clusterCredentials: []
+
+# Notifications controller
+notifications:
+  enabled: true
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+
+# Dex disabled - using OIDC directly
+dex:
+  enabled: false

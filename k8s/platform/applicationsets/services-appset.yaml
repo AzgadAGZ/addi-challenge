@@ -1,0 +1,64 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: addi-services
+  namespace: argocd
+  labels:
+    app.kubernetes.io/managed-by: platform-engineering
+    addi.com/tier: platform
+  annotations:
+    addi.com/description: |
+      Discovers all services under k8s/services/*/dev|staging|prod.
+      Creates one ArgoCD Application per service per environment.
+      Multi-source: shared addi-workload Helm chart + per-service values.yaml.
+      Prune + SelfHeal enabled: Git is the source of truth.
+spec:
+  goTemplate: true
+  generators:
+    - git:
+        repoURL: https://github.com/addi/addi-platform
+        revision: HEAD
+        directories:
+          - path: "k8s/services/*/dev"
+          - path: "k8s/services/*/staging"
+          - path: "k8s/services/*/prod"
+  template:
+    metadata:
+      name: "{{ index .path.segments 2 }}-{{ .path.basename }}"
+      namespace: argocd
+      labels:
+        addi.com/service: "{{ index .path.segments 2 }}"
+        addi.com/environment: "{{ .path.basename }}"
+        app.kubernetes.io/managed-by: platform-engineering
+    spec:
+      project: default
+      sources:
+        - repoURL: ghcr.io/addi/charts
+          chart: addi-workload
+          targetRevision: 0.1.0
+          helm:
+            valueFiles:
+              - $values/{{ .path.path }}/values.yaml
+        - repoURL: https://github.com/addi/addi-platform
+          targetRevision: HEAD
+          ref: values
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: "{{ index .path.segments 2 }}"
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          - ServerSideApply=true
+      ignoreDifferences:
+        - group: argoproj.io
+          kind: Rollout
+          jsonPointers:
+            - /spec/replicas
+        - group: apps
+          kind: Deployment
+          jsonPointers:
+            - /spec/replicas
+  preserveResourcesOnDeletion: true

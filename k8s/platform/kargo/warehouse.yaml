@@ -1,0 +1,23 @@
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Warehouse
+metadata:
+  name: addi-services
+  namespace: addi
+  labels:
+    app.kubernetes.io/managed-by: platform-engineering
+    addi.com/tier: platform
+spec:
+  # Watch all Addi service images in GHCR
+  # Kargo detects new tags and creates Freight automatically
+  subscriptions:
+    - image:
+        repoURL: ghcr.io/addi
+        # NewestBuild: picks the most recently built image
+        # (uses image creation timestamp, not tag name)
+        imageSelectionStrategy: NewestBuild
+        # Only track signed images (Cosign keyless via GitHub OIDC)
+        constraint: "semver:>=0.0.1"
+        platform: linux/amd64
+
+  # Freight creation - one Freight per detected new image
+  # Freight bundles image refs + git commit ref for atomic promotion

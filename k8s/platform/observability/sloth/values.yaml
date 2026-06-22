@@ -1,0 +1,43 @@
+# Sloth - SLO controller Helm values
+# Generates multi-window burn-rate PrometheusRules from PrometheusServiceLevel CRDs
+# Service teams define SLOs in k8s/services/*/base/slo.yaml
+# Sloth compiles them into Mimir recording + alerting rules
+
+# Controller
+sloth:
+  image:
+    tag: v0.11.0
+
+  # Log level
+  logLevel: info
+
+  # Default SLO metadata labels (attached to all generated rules)
+  defaultLabels:
+    managed_by: sloth
+    addi_platform: "true"
+
+  # PrometheusServiceLevel CRD support
+  enabledPrometheusSDK: true
+
+  # Metrics for self-monitoring
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  # RBAC - needs to watch PrometheusServiceLevel CRDs
+  rbac:
+    create: true
+
+  # Watches all namespaces (1000+ services across namespaces)
+  controller:
+    # How often to reconcile SLO rules
+    resyncPeriod: 5m

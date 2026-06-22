@@ -1,0 +1,123 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: block-privileged
+  labels:
+    app.kubernetes.io/managed-by: platform-engineering
+    addi.com/tier: platform
+    addi.com/compliance: "sfc-ce-007-2018"
+  annotations:
+    policies.kyverno.io/title: Block Privileged Containers
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: critical
+    policies.kyverno.io/description: |
+      Deny privileged containers and require runAsNonRoot.
+      Prevents container escape attacks and privilege escalation.
+      SFC CE 007/2018: least privilege enforcement.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    # Block privileged mode
+    - name: deny-privileged-containers
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - cilium
+          - resources:
+              selector:
+                matchLabels:
+                  addi.com/privileged-exception: "true"
+      validate:
+        message: "Privileged containers are not allowed. Remove securityContext.privileged=true."
+        pattern:
+          spec:
+            containers:
+              - =(securityContext):
+                  =(privileged): "false"
+            =(initContainers):
+              - =(securityContext):
+                  =(privileged): "false"
+            =(ephemeralContainers):
+              - =(securityContext):
+                  =(privileged): "false"
+
+    # Require runAsNonRoot
+    - name: require-run-as-non-root
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - cilium
+                - observability
+      validate:
+        message: "Containers must run as non-root. Set securityContext.runAsNonRoot=true."
+        anyPattern:
+          - spec:
+              securityContext:
+                runAsNonRoot: "true"
+          - spec:
+              containers:
+                - securityContext:
+                    runAsNonRoot: "true"
+
+    # Block hostPath mounts (volume escape)
+    - name: deny-host-path
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - cilium
+                - observability
+      validate:
+        message: "HostPath volumes are not allowed."
+        pattern:
+          spec:
+            =(volumes):
+              - =(hostPath): null
+
+    # Block hostNetwork / hostPID / hostIPC
+    - name: deny-host-namespaces
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+      validate:
+        message: "Host namespaces (hostNetwork, hostPID, hostIPC) are not allowed."
+        deny:
+          conditions:
+            any:
+              - key: "{{ request.object.spec.hostNetwork }}"
+                operator: Equals
+                value: true
+              - key: "{{ request.object.spec.hostPID }}"
+                operator: Equals
+                value: true
+              - key: "{{ request.object.spec.hostIPC }}"
+                operator: Equals
+                value: true

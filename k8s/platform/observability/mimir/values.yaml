@@ -1,0 +1,158 @@
+# Grafana Mimir - Helm values
+# Microservices mode for 1000-service scale (~250K active series)
+# S3 backend for long-term metric storage (SFC audit trail)
+# Multi-tenant: all Addi services in "addi" tenant
+
+mimir:
+  structuredConfig:
+    # Multi-tenancy
+    multitenancy_enabled: true
+
+    # Limits per tenant (tuned for 1000 services)
+    limits:
+      ingestion_rate: 150000
+      ingestion_burst_size: 300000
+      max_global_series_per_user: 500000
+      max_fetched_chunks_per_query: 3000000
+      max_label_names_per_series: 30
+      compactor_blocks_retention_period: 30d
+
+    # S3 storage backend
+    blocks_storage:
+      backend: s3
+      s3:
+        bucket_name: "${MIMIR_BLOCKS_BUCKET}"
+        region: us-east-1
+        endpoint: s3.amazonaws.com
+        sse:
+          type: SSE-KMS
+          kms_key_id: "${MIMIR_KMS_KEY_ID}"
+      tsdb:
+        dir: /data/tsdb
+        block_ranges_period: [2h]
+        retention_period: 6h
+
+    ruler_storage:
+      backend: s3
+      s3:
+        bucket_name: "${MIMIR_RULER_BUCKET}"
+        region: us-east-1
+
+    alertmanager_storage:
+      backend: s3
+      s3:
+        bucket_name: "${MIMIR_ALERTMANAGER_BUCKET}"
+        region: us-east-1
+
+# Component replicas (microservices mode HA)
+distributor:
+  replicas: 3
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+
+ingester:
+  replicas: 6
+  persistentVolume:
+    enabled: true
+    size: 50Gi
+    storageClass: gp3
+  resources:
+    requests:
+      cpu: 1000m
+      memory: 4Gi
+    limits:
+      cpu: 4000m
+      memory: 8Gi
+
+querier:
+  replicas: 3
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2Gi
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+
+query_frontend:
+  replicas: 2
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+query_scheduler:
+  enabled: true
+  replicas: 2
+
+compactor:
+  replicas: 1
+  persistentVolume:
+    enabled: true
+    size: 20Gi
+    storageClass: gp3
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+
+store_gateway:
+  replicas: 3
+  persistentVolume:
+    enabled: true
+    size: 20Gi
+    storageClass: gp3
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+
+ruler:
+  replicas: 2
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+alertmanager:
+  enabled: true
+  replicas: 3
+  fallbackConfig: |
+    receivers:
+      - name: default
+        webhook_configs:
+          - url: "${ALERTMANAGER_WEBHOOK_URL}"
+            send_resolved: true
+    route:
+      receiver: default
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+
+# Monitoring
+metaMonitoring:
+  serviceMonitor:
+    enabled: true
+  prometheusRule:
+    enabled: true
+
+# MinIO disabled - using AWS S3
+minio:
+  enabled: false

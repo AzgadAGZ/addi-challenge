@@ -1,0 +1,61 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: staging-soak
+  namespace: addi
+  labels:
+    app.kubernetes.io/managed-by: platform-engineering
+    addi.com/tier: platform
+  annotations:
+    addi.com/description: |
+      Staging soak verification via Prometheus golden signals.
+      Runs for 1 hour with 5-minute intervals to confirm sustained health
+      before promotion to production.
+      Gates: error rate < 5% AND p99 latency < 500ms (sustained over 1h).
+spec:
+  args:
+    - name: service
+      # Provided by Kargo at runtime: {{args.service}}
+    - name: namespace
+      value: addi
+
+  metrics:
+    # Gate 1: Error rate < 5% sustained over soak window
+    - name: error-rate
+      interval: 5m
+      count: 48        # 48 × 5m = 240m (4h) total soak window
+      failureLimit: 2
+      successCondition: result[0] < 0.05
+      provider:
+        prometheus:
+          address: http://mimir-query-frontend.observability.svc.cluster.local:8080/prometheus
+          query: |
+            (
+              sum(rate(http_requests_total{
+                service="{{args.service}}",
+                namespace="{{args.namespace}}",
+                status=~"5.."
+              }[5m]))
+              /
+              sum(rate(http_requests_total{
+                service="{{args.service}}",
+                namespace="{{args.namespace}}"
+              }[5m]))
+            ) OR on() vector(0)
+
+    # Gate 2: p99 latency < 500ms sustained over soak window
+    - name: latency-p99
+      interval: 5m
+      count: 48        # 48 × 5m = 240m (4h) total soak window
+      failureLimit: 2
+      successCondition: result[0] < 0.5
+      provider:
+        prometheus:
+          address: http://mimir-query-frontend.observability.svc.cluster.local:8080/prometheus
+          query: |
+            histogram_quantile(0.99,
+              sum(rate(http_request_duration_seconds_bucket{
+                service="{{args.service}}",
+                namespace="{{args.namespace}}"
+              }[5m])) by (le)
+            )

@@ -1,0 +1,49 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-image-signing
+  labels:
+    app.kubernetes.io/managed-by: platform-engineering
+    addi.com/tier: platform
+    addi.com/compliance: "sfc-ce-007-2018"
+  annotations:
+    policies.kyverno.io/title: Require Cosign Image Signing
+    policies.kyverno.io/category: Supply Chain Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: |
+      All container images must be signed via Cosign (keyless, GitHub OIDC).
+      Only images from ghcr.io/addi/* are subject to this policy.
+      Unsigned images are blocked at admission time.
+      SFC CE 007/2018: supply chain integrity.
+spec:
+  validationFailureAction: Enforce
+  background: false
+  webhookTimeoutSeconds: 15
+  rules:
+    - name: verify-cosign-signature
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaceSelector:
+                matchExpressions:
+                  - key: addi.com/workload-type
+                    operator: In
+                    values:
+                      - service
+                      - platform
+      verifyImages:
+        - imageReferences:
+            - "ghcr.io/addi/*"
+          attestors:
+            - count: 1
+              entries:
+                - keyless:
+                    subject: "https://github.com/addi/*"
+                    issuer: "https://token.actions.githubusercontent.com"
+                    rekor:
+                      url: https://rekor.sigstore.dev
+          mutateDigest: true
+          required: true
+          verifyDigest: true

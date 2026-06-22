@@ -1,0 +1,129 @@
+apiVersion: opentelemetry.io/v1beta1
+kind: OpenTelemetryCollector
+metadata:
+  name: addi-collector
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/component: tracing
+    app.kubernetes.io/managed-by: platform-engineering
+    addi.com/tier: platform
+  annotations:
+    addi.com/description: |
+      OTel Collector (DaemonSet mode) for services that push traces directly.
+      Complements Alloy. Services without Alloy sidecar can push to this collector.
+      Exports to Tempo via OTLP HTTP.
+spec:
+  mode: daemonset
+  image: otel/opentelemetry-collector-contrib:0.108.0
+  serviceAccount: otel-collector
+
+  config:
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: "0.0.0.0:4317"
+          http:
+            endpoint: "0.0.0.0:4318"
+
+    processors:
+      # Memory limiter - prevents OOM on noisy services
+      memory_limiter:
+        check_interval: 1s
+        limit_percentage: 75
+        spike_limit_percentage: 15
+
+      # Batch for efficiency
+      batch:
+        timeout: 5s
+        send_batch_size: 1024
+        send_batch_max_size: 2048
+
+      # Add environment attribute to all spans
+      attributes:
+        actions:
+          - key: deployment.environment
+            value: "${DEPLOYMENT_ENVIRONMENT}"
+            action: upsert
+          - key: k8s.cluster.name
+            value: "${K8S_CLUSTER_NAME}"
+            action: upsert
+
+      # Resource detection - enrich with pod/node info
+      resourcedetection:
+        detectors: [eks, env, system]
+        timeout: 2s
+        override: false
+
+    exporters:
+      # Tempo - OTLP HTTP
+      otlphttp/tempo:
+        endpoint: "http://tempo-distributor.observability.svc.cluster.local:4318"
+        tls:
+          insecure: true
+        headers:
+          X-Scope-OrgID: addi
+
+      # Debug (disabled in prod - set via env override)
+      debug:
+        verbosity: basic
+
+    extensions:
+      health_check:
+        endpoint: "0.0.0.0:13133"
+      pprof:
+        endpoint: "0.0.0.0:1777"
+      zpages:
+        endpoint: "0.0.0.0:55679"
+
+    service:
+      extensions: [health_check, pprof, zpages]
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, resourcedetection, attributes, batch]
+          exporters: [otlphttp/tempo]
+      telemetry:
+        metrics:
+          address: "0.0.0.0:8888"
+        logs:
+          level: info
+
+  env:
+    - name: DEPLOYMENT_ENVIRONMENT
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.labels['addi.com/environment']
+    - name: K8S_CLUSTER_NAME
+      valueFrom:
+        configMapKeyRef:
+          name: cluster-info
+          key: cluster-name
+          optional: true
+    - name: K8S_NODE_NAME
+      valueFrom:
+        fieldRef:
+          fieldPath: spec.nodeName
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  volumeMounts:
+    - name: varlogpods
+      mountPath: /var/log/pods
+      readOnly: true
+
+  volumes:
+    - name: varlogpods
+      hostPath:
+        path: /var/log/pods
+
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8888"
