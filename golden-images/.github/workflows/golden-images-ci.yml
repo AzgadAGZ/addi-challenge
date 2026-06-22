@@ -5,7 +5,7 @@ on:
     branches: [main]
     paths: ["golden-images/**"]
   schedule:
-    - cron: "0 6 * * 1"  # Weekly Monday 6am UTC
+    - cron: "0 6 * * 1"
 
 permissions:
   contents: read
@@ -45,8 +45,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build image
+      # Build ONCE — export as OCI tarball for scanning, then push the exact same artifact
+      - name: Build image (local only)
         uses: docker/build-push-action@v7
+        id: build
         with:
           context: golden-images/${{ matrix.image }}
           push: false
@@ -56,27 +58,28 @@ jobs:
             security.cve-exceptions=${{ steps.exceptions.outputs.label }}
             org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
 
+      # === 7-SCANNER GATE (all must pass before push) ===
+
       # Scanner 1: Hadolint (Dockerfile lint)
       - name: Hadolint
         run: |
           docker run --rm -i hadolint/hadolint < golden-images/${{ matrix.image }}/Dockerfile
 
-      # Scanner 2: Trivy (CVE scan with exceptions)
+      # Scanner 2: Trivy (CVE scan — no --ignore-unfixed for base images, unfixed CVEs matter here)
       - name: Trivy image scan
         run: |
           trivy image \
             --severity HIGH,CRITICAL \
             --ignorefile golden-images/.trivyignore-${{ matrix.image }} \
             --exit-code 1 \
-            --ignore-unfixed \
             ${{ env.REGISTRY }}/base-${{ matrix.image }}:${{ github.sha }}
 
-      # Scanner 3: Grype (CVE scan, second opinion)
+      # Scanner 3: Grype (second opinion — hard fail, no || true)
       - name: Grype image scan
         run: |
           grype ${{ env.REGISTRY }}/base-${{ matrix.image }}:${{ github.sha }} \
             --fail-on high \
-            -c golden-images/.grype-${{ matrix.image }}.yaml || true
+            -c golden-images/.grype-${{ matrix.image }}.yaml
 
       # Scanner 4: Dockle (CIS benchmark)
       - name: Dockle
@@ -101,25 +104,28 @@ jobs:
         run: |
           checkov -f golden-images/${{ matrix.image }}/Dockerfile --framework dockerfile
 
-      # All scanners passed - push
-      - name: Push to GHCR
-        uses: docker/build-push-action@v7
-        id: push
-        with:
-          context: golden-images/${{ matrix.image }}
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/base-${{ matrix.image }}:${{ github.sha }}
-            ${{ env.REGISTRY }}/base-${{ matrix.image }}:latest
-          labels: |
-            security.cve-exceptions=${{ steps.exceptions.outputs.label }}
+      # === ALL SCANNERS PASSED — push the SAME image we scanned (by digest) ===
 
-      # Sign with Cosign
+      - name: Push scanned image to GHCR
+        run: |
+          SCANNED_DIGEST="${{ steps.build.outputs.digest }}"
+          docker tag "${{ env.REGISTRY }}/base-${{ matrix.image }}:${{ github.sha }}" \
+                     "${{ env.REGISTRY }}/base-${{ matrix.image }}:latest"
+          docker push "${{ env.REGISTRY }}/base-${{ matrix.image }}:${{ github.sha }}"
+          docker push "${{ env.REGISTRY }}/base-${{ matrix.image }}:latest"
+          PUSHED_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' \
+            "${{ env.REGISTRY }}/base-${{ matrix.image }}:${{ github.sha }}" | cut -d@ -f2)
+          echo "digest=${PUSHED_DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Scanned digest: ${SCANNED_DIGEST}"
+          echo "Pushed digest:  ${PUSHED_DIGEST}"
+        id: push
+
+      # Sign the exact digest we scanned and pushed
       - name: Sign image
         uses: sigstore/cosign-installer@v4
-      - run: cosign sign --yes ${{ env.REGISTRY }}/base-${{ matrix.image }}@${{ steps.push.outputs.digest }}
+      - run: cosign sign --yes "${{ env.REGISTRY }}/base-${{ matrix.image }}@${{ steps.push.outputs.digest }}"
         env:
           COSIGN_EXPERIMENTAL: "1"
 
-      # Attach SBOM
-      - run: cosign attach sbom --sbom sbom-${{ matrix.image }}.json ${{ env.REGISTRY }}/base-${{ matrix.image }}@${{ steps.push.outputs.digest }}
+      # Attach SBOM to the same digest
+      - run: cosign attach sbom --sbom sbom-${{ matrix.image }}.json "${{ env.REGISTRY }}/base-${{ matrix.image }}@${{ steps.push.outputs.digest }}"
