@@ -1,0 +1,23 @@
+flowchart LR
+    subgraph Ext["External Path - 150-500ms"]
+        C["Client"] -->|HTTPS| DNS["Route53"]
+        DNS --> CF["CloudFront"]
+        CF --> WAF["WAF"]
+        WAF --> ALB["Private ALB"]
+        ALB --> P1["Pod"]
+    end
+
+    subgraph Int["Internal Path - &lt;1ms, $0"]
+        PA["Pod A"] -->|ClusterIP| Cilium["Cilium eBPF"]
+        Cilium -->|mTLS + NetworkPolicy| PB["Pod B"]
+    end
+
+    Ext ~~~ Int
+
+    Note1["External: TLS + WAF + ALB overhead"]
+    Note2["Internal: kernel-space, no ALB, no NAT"]
+
+    style Ext fill:#ffcccc,stroke:#c62828
+    style Int fill:#ccffcc,stroke:#2e7d32
+    style Note1 fill:#fff3cd,stroke:#856404
+    style Note2 fill:#d4edda,stroke:#155724

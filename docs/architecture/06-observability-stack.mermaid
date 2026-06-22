@@ -1,0 +1,42 @@
+flowchart TD
+    subgraph Apps["1000+ Microservices"]
+        API["API services"]
+        Workers["Workers"]
+        Crons["CronJobs"]
+    end
+
+    Apps -->|OTel SDK| Alloy["Alloy DaemonSet"]
+
+    Alloy --> PII["PII Redaction: cedula, NIT, cards, emails"]
+
+    PII -->|Metrics| Mimir["Mimir - S3 backend"]
+    PII -->|Logs| Loki["Loki - S3 backend"]
+    PII -->|Traces 10pct| Tempo["Tempo - S3 backend"]
+
+    Mimir --> Grafana["Grafana HA"]
+    Loki --> Grafana
+    Tempo --> Grafana
+
+    subgraph SLO["SLO Pipeline"]
+        Spec["slo.yaml per service"] --> Sloth["Sloth generator"]
+        Sloth --> Rules["PrometheusRules"]
+        Rules --> Burn["Burn-rate alerts"]
+    end
+
+    Rules -->|Recording rules| Mimir
+
+    Burn -->|14x burn| PD["PagerDuty page"]
+    Burn -->|6x burn| Slack["Slack notify"]
+
+    Mimir -->|Query| AR["Argo Rollouts AnalysisRun"]
+    AR --> Gate{"PASS?"}
+    Gate -->|Yes| Advance["Advance canary"]
+    Gate -->|No| Rollback["Auto-rollback"]
+
+    DT["Dependency-Track"] -.->|CVE alerts| Slack
+
+    style Apps fill:#bbdefb,stroke:#1565c0
+    style Alloy fill:#c8e6c9,stroke:#2e7d32
+    style PII fill:#fff9c4,stroke:#f9a825
+    style SLO fill:#e1bee7,stroke:#7b1fa2
+    style Rollback fill:#ffcccc,stroke:#c62828

@@ -1,0 +1,87 @@
+---
+config:
+  theme: base
+  flowchart:
+    nodeSpacing: 40
+    rankSpacing: 50
+    padding: 25
+    wrappingWidth: 300
+---
+flowchart TD
+    subgraph Phase1[" "]
+        direction TB
+        Phase1Title["**PHASE 1: FOUNDATION - Weeks 1-4**\nInstall Platform Alongside Existing Infra\nZero Traffic Changes"]
+        W1["**Week 1-2: Infrastructure**\n- Deploy Cilium CNI hybrid mode\n- Deploy ArgoCD, Kargo, Argo Rollouts\n- Deploy Alloy + LGTM observability\n- Deploy Kyverno audit mode\n- Setup gitops repo structure"]
+        W2["**Week 3-4: Golden Path**\n- Define service-spec.json Schema\n- Build generator CLI\n- Create ApplicationSet path-based discovery\n- Onboard 1 pilot service end-to-end\n- Validate: spec->generate->ArgoCD->canary->SLO"]
+        Phase1Title --> W1 --> W2
+    end
+
+    Phase1 -->|"Services ready"| Phase2
+
+    subgraph Phase2[" "]
+        direction TB
+        Phase2Title["**PHASE 2: PILOT - Weeks 5-8**\n10 Non-Critical Services\nRoute53 Weighted Cutover per Service"]
+        PilotStart["Select 10 Early-Adopter Services\nLow-traffic, non-critical\nWilling teams"]
+        Migration1["**Per-Service Migration:**\n1. Create namespace\n2. Deploy to new ns\n3. Preview ALB validation\n4. Route53 Weighted DNS Cutover"]
+        Weight["**DNS Weight Cutover Timeline:**\nDay 0: legacy 100pct / new 0pct\nDay 1: legacy 90pct / new 10pct\nDay 2: legacy 50pct / new 50pct\nDay 3: legacy 0pct / new 100pct"]
+        Monitor["**Monitor Side-by-Side:**\nError rate legacy vs new\nAuto go/no-go gate:\nnew error rate < 2x legacy"]
+        Decom["**Decommission:**\nScale old to 0\nWait 48hrs\nDelete namespace"]
+
+        Phase2Title --> PilotStart --> Migration1 --> Weight --> Monitor --> Decom
+    end
+
+    Phase2 -->|"Confident"| Phase3
+
+    subgraph Phase3[" "]
+        direction TB
+        Phase3Title["**PHASE 3: BATCH - Weeks 9-20**\nRemaining 990 Services\n6 Waves by Domain"]
+        Wave1["WAVE 1: Weeks 9-10 - ~50 services\nInternal Tools, Backoffice"]
+        Wave2["WAVE 2: Weeks 11-12 - ~80 services\nNotifications, Messaging"]
+        Wave3["WAVE 3: Weeks 13-14 - ~100 services\nProduct Catalog, Search"]
+        Wave4["WAVE 4: Weeks 15-16 - ~150 services\nLending, Credit Scoring"]
+        Wave5["WAVE 5: Weeks 17-18 - ~200 services\nPayments, Billing"]
+        Wave6["WAVE 6: Weeks 19-20 - ~410 services\nAuth, Identity, Fraud"]
+        Rationale["**Rationale:**\n- Internal first: lowest blast radius\n- SFC-critical last: max team experience\n- 48hr validation minimum between waves\n- Auto go/no-go on error budget"]
+
+        Phase3Title --> Wave1 --> Wave2 --> Wave3 --> Wave4 --> Wave5 --> Wave6 --> Rationale
+    end
+
+    Phase3 -->|"Hardened"| Phase4
+
+    subgraph Phase4[" "]
+        direction TB
+        Phase4Title["**PHASE 4: HARDENING - Weeks 21-24**\nEnforce All Policies - Delete Legacy"]
+        Enforce["**Enable Enforcement:**\n- Kyverno audit -> enforce mode\n- CiliumNetworkPolicy default-deny cluster-wide\n- RBAC team-scoped roles only"]
+        Cleanup["**Cleanup:**\n- Delete legacy namespace workloads\n- Remove legacy ALB\n- Final SFC compliance audit"]
+        Ready["**Target State Achieved:**\nNamespace-per-service\nCloudFront + WAF + Private ALB\nCilium mesh + mTLS\nIndependent canary rollouts\nSLO-driven gates"]
+
+        Phase4Title --> Enforce --> Cleanup --> Ready
+    end
+
+    subgraph DualRun[" "]
+        direction TB
+        DualRunTitle["**DUAL-RUNNING PERIOD**\nPhases 1-3 Overlap\nLegacy + New In Parallel"]
+        LegacyPath["**Legacy ALB Path**\nPublic ALB\ndefault namespace\n1000+ pods\nManual trains\nAs-is"]
+        NewPath["**New Platform Path**\nCloudFront + WAF\nPrivate ALB\nPer-service namespaces\nAuto Kargo promotions\nCanary rollouts\nSLO gates"]
+        Route53Split["**Route53 Weighted Records**\nservice.example.com\nPoint to both ALBs\nWeight by pct traffic"]
+        Revert["**Fast Rollback:**\nChange Route53 weight\nBack to legacy 100pct\nPropagation: ~60s TTL 60"]
+
+        DualRunTitle --> LegacyPath & NewPath
+        LegacyPath --> Route53Split
+        NewPath --> Route53Split
+        Route53Split --> Revert
+    end
+
+    DualRun -.->|"Operational during"| Phase2
+    DualRun -.->|"Operational during"| Phase3
+
+    style Phase1 fill:#c8e6c9,stroke:#43a047
+    style Phase2 fill:#ffe0b2,stroke:#ef6c00
+    style Phase3 fill:#ffccbc,stroke:#d84315
+    style Phase4 fill:#b3e5fc,stroke:#0277bd
+    style DualRun fill:#fff9c4,stroke:#f9a825
+    style Phase1Title fill:#c8e6c9,stroke:#c8e6c9
+    style Phase2Title fill:#ffe0b2,stroke:#ffe0b2
+    style Phase3Title fill:#ffccbc,stroke:#ffccbc
+    style Phase4Title fill:#b3e5fc,stroke:#b3e5fc
+    style DualRunTitle fill:#fff9c4,stroke:#fff9c4

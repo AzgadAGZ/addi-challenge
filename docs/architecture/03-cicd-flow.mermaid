@@ -1,0 +1,34 @@
+flowchart TD
+    subgraph CI["CI - GitHub Actions"]
+        PR["PR"] --> Build["Build + Push GHCR"]
+        Build --> Scan["Trivy scan"]
+        Scan -->|PASS| Sign["Cosign sign"]
+        Sign --> SBOM["SBOM + attach"]
+    end
+
+    SBOM --> Freight["Kargo Freight created"]
+
+    Freight -->|Auto| Dev["DEV - rolling update"]
+    Dev -->|Health OK| Stg["STAGING - 4hr soak"]
+    Stg -->|Manual or SLO OK| Prod["PROD - canary rollout"]
+
+    Prod --> Canary
+
+    subgraph Canary["Argo Rollouts Canary"]
+        C1["10pct traffic"] -->|5min| A1{"AnalysisRun"}
+        A1 -->|PASS| C2["50pct traffic"]
+        C2 -->|5min| A2{"AnalysisRun"}
+        A2 -->|PASS| C3["100pct - stable"]
+        A1 -->|FAIL| RB["Auto-rollback"]
+        A2 -->|FAIL| RB
+    end
+
+    A1 -.->|Query| Prom["Prometheus: error rate &lt; 5pct, p99 &lt; 500ms"]
+    A2 -.->|Query| Prom
+
+    C3 --> Live["Service live"]
+    RB --> Fix["Team investigates + re-deploys"]
+
+    style CI fill:#bbdefb,stroke:#1565c0
+    style Canary fill:#f0f4c3,stroke:#827717
+    style RB fill:#ffcccc,stroke:#c62828

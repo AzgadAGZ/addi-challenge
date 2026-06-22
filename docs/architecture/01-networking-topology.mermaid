@@ -1,0 +1,27 @@
+flowchart TD
+    Client["Client"] -->|HTTPS| R53["Route53"]
+    R53 --> CF["CloudFront + TLS"]
+    CF --> WAF["AWS WAF"]
+    WAF -->|VPC Origin| ALB["Private ALB"]
+
+    subgraph VPC["AWS VPC - Multi-AZ"]
+        ALB --> PA["payments-api :8080"]
+
+        subgraph Mesh["Cilium eBPF Mesh - mTLS, &lt;1ms"]
+            PA <-->|ClusterIP| FE["fraud-engine"]
+            PA <-->|ClusterIP| PG["postgres via VPC Endpoint"]
+            FE <-->|ClusterIP| NS["notifications"]
+            FE <-->|ClusterIP| PG
+        end
+
+        VPCE["VPC Endpoints: S3, ECR, STS, SSM, KMS"]
+    end
+
+    Mesh -.->|Hubble flows| Obs["Grafana - service map"]
+
+    NAT["NAT GW: 3x prod, 1x dev"]
+
+    style VPC fill:#eceff1,stroke:#607d8b
+    style Mesh fill:#e8f5e9,stroke:#43a047
+    style WAF fill:#fce4ec,stroke:#c62828
+    style CF fill:#fff3e0,stroke:#e65100

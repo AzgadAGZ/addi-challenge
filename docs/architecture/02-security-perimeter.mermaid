@@ -1,0 +1,39 @@
+flowchart TD
+    subgraph L1["Layer 1: Edge"]
+        CF["CloudFront TLS"] --> HV["Host validation - ByteMatch + label"]
+        HV --> MR["OWASP managed rules - SQLi, XSS, Bot"]
+        MR --> RL["Rate limit - 2000 req/5min"]
+        RL --> Allow["Allow labeled traffic"]
+    end
+
+    Allow -->|VPC Origin| L2
+
+    subgraph L2["Layer 2: Cluster"]
+        Cilium["Cilium CNI - eBPF, kubeProxyReplacement"]
+        mTLS["mTLS - auto-cert rotation"]
+        NetPol["Default-deny NetworkPolicy"]
+        Kyv["Kyverno admission control"]
+        Cilium --> mTLS --> NetPol --> Kyv
+    end
+
+    Kyv --> L3
+
+    subgraph L3["Layer 3: Supply Chain"]
+        GL["Gitleaks - secrets"] --> Build["Distroless build"]
+        Build --> Trivy["Trivy - CVE scan"]
+        Trivy --> Cosign["Cosign keyless sign"]
+        Cosign --> SBOM["CycloneDX SBOM"]
+        SBOM --> GHCR["Push to GHCR"]
+    end
+
+    subgraph Gov["CODEOWNERS Governance"]
+        Platform["Platform team: k8s/platform, terraform, spec/lib"]
+        Joint["Joint approval: exposure, NetworkPolicy, prod overlays"]
+    end
+
+    Kyv -.->|Enforces| Gov
+
+    style L1 fill:#fce4ec,stroke:#c62828
+    style L2 fill:#e8f5e9,stroke:#2e7d32
+    style L3 fill:#fff3e0,stroke:#e65100
+    style Gov fill:#f3e5f5,stroke:#7b1fa2
