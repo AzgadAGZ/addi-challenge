@@ -1,0 +1,125 @@
+name: Golden Images CI
+
+on:
+  push:
+    branches: [main]
+    paths: ["golden-images/**"]
+  schedule:
+    - cron: "0 6 * * 1"  # Weekly Monday 6am UTC
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+env:
+  REGISTRY: ghcr.io/addi
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: [go, python, node]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Generate scanner ignore files
+        run: |
+          cd golden-images
+          ./security/generate-ignore-files.sh ${{ matrix.image }}
+
+      - name: Read OCI exception label
+        id: exceptions
+        run: |
+          LABEL=$(cat golden-images/.oci-label-${{ matrix.image }}.json)
+          echo "label=${LABEL}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: golden-images/${{ matrix.image }}
+          push: false
+          load: true
+          tags: ${{ env.REGISTRY }}/base-${{ matrix.image }}:${{ github.sha }}
+          labels: |
+            security.cve-exceptions=${{ steps.exceptions.outputs.label }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+
+      # Scanner 1: Hadolint (Dockerfile lint)
+      - name: Hadolint
+        run: |
+          docker run --rm -i hadolint/hadolint < golden-images/${{ matrix.image }}/Dockerfile
+
+      # Scanner 2: Trivy (CVE scan with exceptions)
+      - name: Trivy image scan
+        run: |
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --ignorefile golden-images/.trivyignore-${{ matrix.image }} \
+            --exit-code 1 \
+            --ignore-unfixed \
+            ${{ env.REGISTRY }}/base-${{ matrix.image }}:${{ github.sha }}
+
+      # Scanner 3: Grype (CVE scan, second opinion)
+      - name: Grype image scan
+        run: |
+          grype ${{ env.REGISTRY }}/base-${{ matrix.image }}:${{ github.sha }} \
+            --fail-on high \
+            -c golden-images/.grype-${{ matrix.image }}.yaml || true
+
+      # Scanner 4: Dockle (CIS benchmark)
+      - name: Dockle
+        run: |
+          dockle --exit-code 1 \
+            --accept-file golden-images/.dockle-accept-${{ matrix.image }} \
+            ${{ env.REGISTRY }}/base-${{ matrix.image }}:${{ github.sha }}
+
+      # Scanner 5: Gitleaks (secrets in build context)
+      - name: Gitleaks
+        run: |
+          gitleaks detect --source golden-images/${{ matrix.image }} --exit-code 1
+
+      # Scanner 6: Syft (SBOM generation)
+      - name: Generate SBOM
+        run: |
+          syft ${{ env.REGISTRY }}/base-${{ matrix.image }}:${{ github.sha }} \
+            -o cyclonedx-json=sbom-${{ matrix.image }}.json
+
+      # Scanner 7: Checkov (Dockerfile security)
+      - name: Checkov
+        run: |
+          checkov -f golden-images/${{ matrix.image }}/Dockerfile --framework dockerfile
+
+      # All scanners passed - push
+      - name: Push to GHCR
+        uses: docker/build-push-action@v7
+        id: push
+        with:
+          context: golden-images/${{ matrix.image }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/base-${{ matrix.image }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/base-${{ matrix.image }}:latest
+          labels: |
+            security.cve-exceptions=${{ steps.exceptions.outputs.label }}
+
+      # Sign with Cosign
+      - name: Sign image
+        uses: sigstore/cosign-installer@v4
+      - run: cosign sign --yes ${{ env.REGISTRY }}/base-${{ matrix.image }}@${{ steps.push.outputs.digest }}
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+
+      # Attach SBOM
+      - run: cosign attach sbom --sbom sbom-${{ matrix.image }}.json ${{ env.REGISTRY }}/base-${{ matrix.image }}@${{ steps.push.outputs.digest }}
