@@ -1,0 +1,244 @@
+name: CI - Build, Scan, Sign
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ghcr.io/${{ github.repository }}:${{ github.sha }}
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Scan local image before push (gate on HIGH/CRITICAL CVEs)
+        run: |
+          docker build -t addi-local:${{ github.sha }} --load .
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image \
+            --exit-code 1 \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            addi-local:${{ github.sha }}
+
+      - name: Build and push to GHCR
+        id: push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          cache-from: type=registry,mode=max
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+
+  compile-config:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        env: [dev-us-east-1, staging-us-east-1, prod-us-east-1]
+        # prod-us-east-2 (DR): add when DR Kargo Stage is implemented
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install ORAS
+        run: |
+          ORAS_VERSION="1.2.0"
+          curl -fsSLO "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz"
+          tar -xzf "oras_${ORAS_VERSION}_linux_amd64.tar.gz" -C /usr/local/bin/ oras
+
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Compile Starlark config
+        env:
+          SERVICE_NAME: ${{ github.event.repository.name }}
+          TARGET_ENV: ${{ matrix.env }}
+        run: |
+          # In production: addi-platform compile service.star + deploy/${{ matrix.env }}.star
+          # For take-home: copy the pre-compiled example values
+          mkdir -p /tmp/compiled
+          # Strip region suffix: dev-us-east-1 -> dev, staging-us-east-1 -> staging, prod-us-east-1 -> prod
+          OVERLAY=$(echo "$TARGET_ENV" | sed -E 's/-(us-east|ca-central)-[0-9]+$//')
+          OVERLAY_PATH="k8s/services/${SERVICE_NAME}/${OVERLAY}/values.yaml"
+          if [[ -f "$OVERLAY_PATH" ]]; then
+            cp "$OVERLAY_PATH" /tmp/compiled/values.yaml
+          else
+            echo "# Compiled values for ${SERVICE_NAME} @ ${TARGET_ENV}" > /tmp/compiled/values.yaml
+          fi
+
+      - name: Push config artifact to GHCR
+        env:
+          SERVICE_NAME: ${{ github.event.repository.name }}
+          VERSION: ${{ github.sha }}
+          ENV: ${{ matrix.env }}
+        run: |
+          oras push \
+            ghcr.io/${{ github.repository_owner }}/addi-configs:${SERVICE_NAME}-${VERSION}-${ENV} \
+            --artifact-type application/vnd.addi.config.v1+yaml \
+            /tmp/compiled/values.yaml:application/yaml
+          echo "Pushed: ghcr.io/${{ github.repository_owner }}/addi-configs:${SERVICE_NAME}-${VERSION}-${ENV}"
+
+  test:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Run tests
+        run: |
+          echo "Running test suite..."
+          # Placeholder: Replace with actual test command
+          # make test
+
+  scan:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Extract base image exceptions
+        id: base-exceptions
+        run: |
+          # Extract FROM image from Dockerfile
+          BASE_IMAGE=$(grep -m1 "^FROM.*AS runtime" Dockerfile | awk '{print $2}' || echo "")
+          if [[ -z "$BASE_IMAGE" ]]; then
+            BASE_IMAGE=$(tail -1 <(grep "^FROM" Dockerfile) | awk '{print $2}')
+          fi
+          echo "Base image: $BASE_IMAGE"
+
+          # Pull and inspect for exception label
+          if ! docker pull "$BASE_IMAGE" 2>&1; then
+            echo "::warning::Could not pull base image $BASE_IMAGE - scanning without base image exceptions"
+          fi
+          EXCEPTIONS=$(docker inspect "$BASE_IMAGE" --format='{{index .Config.Labels "security.cve-exceptions"}}' 2>/dev/null || echo "[]")
+
+          # Generate .trivyignore from base image exceptions
+          python3 -c "
+          import json, sys
+          try:
+              exceptions = json.loads(sys.argv[1])
+              for exc in exceptions:
+                  print(exc.get('id', ''))
+          except:
+              pass
+          " "$EXCEPTIONS" > /tmp/trivyignore-base
+
+          # Merge with repo-local .trivyignore (if exists)
+          cat .trivyignore 2>/dev/null >> /tmp/trivyignore-base || true
+          sort -u /tmp/trivyignore-base > /tmp/trivyignore-merged
+
+          echo "Merged exceptions:"
+          cat /tmp/trivyignore-merged
+          echo "merged_ignore=/tmp/trivyignore-merged" >> "$GITHUB_OUTPUT"
+
+      - name: Run Trivy SARIF scan (post-push, uploads to GitHub Security)
+        uses: aquasecurity/trivy-action@0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}@${{ needs.build-and-push.outputs.digest }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: HIGH,CRITICAL
+          exit-code: '0'
+          ignore-unfixed: true
+          trivyignores: ${{ steps.base-exceptions.outputs.merged_ignore }}
+
+      - name: Upload Trivy SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+
+  sign:
+    needs: [build-and-push, test, compile-config]
+    runs-on: ubuntu-latest
+    env:
+      COSIGN_EXPERIMENTAL: 1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v4
+
+      - name: Sign image with Cosign (keyless)
+        run: |
+          cosign sign --yes "ghcr.io/${{ github.repository }}:${{ github.sha }}"
+
+  sbom:
+    needs: [build-and-push, test, compile-config]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install Trivy
+        run: |
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | tee -a /etc/apt/sources.list.d/trivy.list
+          apt-get update
+          apt-get install -y trivy
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v4
+
+      - name: Generate SBOM (CycloneDX)
+        run: |
+          trivy image --format cyclonedx "ghcr.io/${{ github.repository }}:${{ github.sha }}" > sbom.json
+
+      - name: Attach SBOM with Cosign
+        env:
+          COSIGN_EXPERIMENTAL: 1
+        run: |
+          cosign attach sbom --sbom sbom.json "ghcr.io/${{ github.repository }}:${{ github.sha }}"
+
+      - name: Upload SBOM to Dependency-Track
+        env:
+          DTRACK_URL: ${{ vars.DEPENDENCY_TRACK_URL }}
+          DTRACK_API_KEY: ${{ secrets.DEPENDENCY_TRACK_API_KEY }}
+          PROJECT_NAME: ${{ github.event.repository.name }}
+          PROJECT_VERSION: ${{ github.sha }}
+        run: |
+          if [[ -n "$DTRACK_URL" ]]; then
+            curl -s -X POST "${DTRACK_URL}/api/v1/bom" \
+              -H "X-Api-Key: ${DTRACK_API_KEY}" \
+              -F "projectName=${PROJECT_NAME}" \
+              -F "projectVersion=${PROJECT_VERSION}" \
+              -F "autoCreate=true" \
+              -F "bom=@sbom.json"
+            echo "SBOM uploaded to Dependency-Track"
+          else
+            echo "DEPENDENCY_TRACK_URL not set - skipping upload"
+          fi

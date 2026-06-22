@@ -1,0 +1,115 @@
+name: CD - Kargo Promotion -> GitOps Commit
+
+on:
+  repository_dispatch:
+    types:
+      - kargo-promotion-success
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-gitops:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate payload
+        env:
+          VERSION: ${{ github.event.client_payload.version }}
+          SERVICE_NAME: ${{ github.event.client_payload.service_name }}
+        run: |
+          if [[ -z "$VERSION" ]]; then
+            echo "Error: version not provided in client_payload"
+            exit 1
+          fi
+          if [[ -z "$SERVICE_NAME" ]]; then
+            echo "Error: service_name not provided in client_payload"
+            exit 1
+          fi
+          if [[ ! "$VERSION" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "Error: version contains invalid characters"
+            exit 1
+          fi
+          if [[ ! "$SERVICE_NAME" =~ ^[a-z0-9-]+$ ]]; then
+            echo "Error: service_name contains invalid characters"
+            exit 1
+          fi
+
+      - name: Checkout gitops repository
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install yq
+        run: |
+          wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          chmod +x /usr/local/bin/yq
+
+      - name: Update image tag in kustomization
+        env:
+          SERVICE_NAME: ${{ github.event.client_payload.service_name }}
+          VERSION: ${{ github.event.client_payload.version }}
+          ENV: ${{ github.event.client_payload.environment || 'prod' }}
+        run: |
+          # Construct path to kustomization file
+          KUSTOMIZE_PATH="k8s/services/${SERVICE_NAME}/overlays/${ENV}/kustomization.yaml"
+
+          if [[ ! -f "$KUSTOMIZE_PATH" ]]; then
+            echo "Error: kustomization.yaml not found at $KUSTOMIZE_PATH"
+            exit 1
+          fi
+
+          # Update image tag (assumes standard kustomize format)
+          REPO_OWNER="${{ github.repository_owner }}"
+          yq e ".images[] |= select(.name == \"ghcr.io/${REPO_OWNER}/${SERVICE_NAME}\").newTag = \"${VERSION}\"" -i "$KUSTOMIZE_PATH"
+
+          echo "Updated $KUSTOMIZE_PATH with version ${VERSION}"
+          cat "$KUSTOMIZE_PATH"
+
+      - name: Commit updated kustomization
+        env:
+          SERVICE_NAME: ${{ github.event.client_payload.service_name }}
+          VERSION: ${{ github.event.client_payload.version }}
+        run: |
+          git config user.name "Addi Platform Bot"
+          git config user.email "platform@addi.com"
+          git add k8s/services/*/overlays/*/kustomization.yaml
+          git commit -m "chore: promote ${SERVICE_NAME} to ${VERSION}" || echo "No changes to commit"
+          git push origin main
+
+  create-release:
+    needs: update-gitops
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Generate changelog
+        env:
+          SERVICE_NAME: ${{ github.event.client_payload.service_name }}
+          VERSION: ${{ github.event.client_payload.version }}
+        run: |
+          # Generate changelog from recent commits (simple version)
+          echo "## Changelog for ${SERVICE_NAME}" > CHANGELOG_TEMP.md
+          echo "" >> CHANGELOG_TEMP.md
+          git log --oneline -10 >> CHANGELOG_TEMP.md || echo "No commits found"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.event.client_payload.service_name }}-${{ github.event.client_payload.version }}
+          name: ${{ github.event.client_payload.service_name }} ${{ github.event.client_payload.version }}
+          body_path: CHANGELOG_TEMP.md
+          draft: false
+          prerelease: false
+
+      - name: Attach SBOM reference
+        env:
+          SERVICE_NAME: ${{ github.event.client_payload.service_name }}
+          VERSION: ${{ github.event.client_payload.version }}
+        run: |
+          echo "SBOM available at: ghcr.io/${{ github.repository_owner }}/${{ env.SERVICE_NAME }}:${{ env.VERSION }}"
+          echo "SBOM retrieved via: cosign download sbom ghcr.io/${{ github.repository_owner }}/${{ env.SERVICE_NAME }}:${{ env.VERSION }}"

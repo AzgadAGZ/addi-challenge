@@ -1,0 +1,224 @@
+name: Onboard Service
+
+on:
+  workflow_dispatch:
+    inputs:
+      service_name:
+        description: "Service name (e.g., payments-api)"
+        required: true
+        type: string
+      domain:
+        description: "Domain (e.g., financial-services)"
+        required: true
+        type: string
+      owner:
+        description: "Team owner (e.g., team-payments)"
+        required: true
+        type: string
+      language:
+        description: "Language (go, python, node, java, rust)"
+        required: true
+        type: string
+      workload_type:
+        description: "Workload type"
+        required: true
+        type: choice
+        options:
+          - api
+          - worker
+          - cronjob
+      exposure:
+        description: "Exposure level"
+        required: true
+        type: choice
+        options:
+          - private
+          - cloudfront
+          - public
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate inputs
+        env:
+          SERVICE_NAME: ${{ github.event.inputs.service_name }}
+          DOMAIN: ${{ github.event.inputs.domain }}
+          LANGUAGE: ${{ github.event.inputs.language }}
+        run: |
+          if [[ ! "$SERVICE_NAME" =~ ^[a-z][a-z0-9-]{1,62}$ ]]; then
+            echo "::error::service_name must be lowercase alphanumeric with hyphens, 2-63 chars"
+            exit 1
+          fi
+          if [[ ! "$DOMAIN" =~ ^[a-z][a-z0-9-]{1,62}$ ]]; then
+            echo "::error::domain must be lowercase alphanumeric with hyphens"
+            exit 1
+          fi
+          if [[ ! "$LANGUAGE" =~ ^(go|python|node|java|rust)$ ]]; then
+            echo "::error::language must be one of: go, python, node, java, rust"
+            exit 1
+          fi
+
+  scaffold:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check service does not already exist
+        env:
+          SERVICE_NAME: ${{ github.event.inputs.service_name }}
+        run: |
+          if [[ -d "k8s/services/$SERVICE_NAME" ]]; then
+            echo "::error::Service $SERVICE_NAME already exists"
+            exit 1
+          fi
+
+      - name: Create values.yaml for each environment
+        env:
+          NAME: ${{ github.event.inputs.service_name }}
+          DOMAIN: ${{ github.event.inputs.domain }}
+          OWNER: ${{ github.event.inputs.owner }}
+          TYPE: ${{ github.event.inputs.workload_type }}
+          EXPOSURE: ${{ github.event.inputs.exposure }}
+        run: |
+          for ENV in dev staging prod; do
+            mkdir -p "k8s/services/$NAME/$ENV"
+
+            # Base values shared across environments
+            cat > "k8s/services/$NAME/$ENV/values.yaml" <<YAML
+          # Scaffolded by onboard-service workflow
+          # Edit to match your service requirements
+          name: $NAME
+          domain: $DOMAIN
+          owner: $OWNER
+          workloadType: $TYPE
+          image:
+            repository: ghcr.io/addi
+            tag: PLACEHOLDER
+          exposure: $EXPOSURE
+          YAML
+
+            # Environment-specific overrides
+            case "$ENV" in
+              dev)
+                cat >> "k8s/services/$NAME/$ENV/values.yaml" <<YAML
+          replicas: 1
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          rollout:
+            strategy: rolling
+          env:
+            ENVIRONMENT: dev
+            LOG_LEVEL: debug
+          YAML
+                ;;
+              staging)
+                cat >> "k8s/services/$NAME/$ENV/values.yaml" <<YAML
+          replicas: 2
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          rollout:
+            strategy: rolling
+          env:
+            ENVIRONMENT: staging
+            LOG_LEVEL: info
+          YAML
+                ;;
+              prod)
+                cat >> "k8s/services/$NAME/$ENV/values.yaml" <<YAML
+          replicas: 3
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          rollout:
+            strategy: canary
+            canary:
+              steps:
+                - weight: 10
+                  pause: 5m
+                - weight: 50
+                  pause: 5m
+                - weight: 100
+              analysisTemplate: canary-health
+          slo:
+            enabled: true
+            availability: 99.95
+            latencyP99Ms: 500
+          env:
+            ENVIRONMENT: prod
+            LOG_LEVEL: warn
+          YAML
+                ;;
+            esac
+
+            echo "Created k8s/services/$NAME/$ENV/values.yaml"
+          done
+
+      - name: Create branch and commit
+        env:
+          SERVICE_NAME: ${{ github.event.inputs.service_name }}
+          DOMAIN: ${{ github.event.inputs.domain }}
+          OWNER: ${{ github.event.inputs.owner }}
+        run: |
+          git config user.name "Addi Platform Bot"
+          git config user.email "platform@addi.com"
+          git checkout -b "onboard/$SERVICE_NAME"
+          git add "k8s/services/$SERVICE_NAME"
+          git commit -m "feat: onboard $SERVICE_NAME ($DOMAIN, $OWNER)"
+          git push origin "onboard/$SERVICE_NAME"
+
+      - name: Open PR
+        env:
+          SERVICE_NAME: ${{ github.event.inputs.service_name }}
+          DOMAIN: ${{ github.event.inputs.domain }}
+          OWNER: ${{ github.event.inputs.owner }}
+          TYPE: ${{ github.event.inputs.workload_type }}
+          EXPOSURE: ${{ github.event.inputs.exposure }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create \
+            --title "onboard: $SERVICE_NAME" \
+            --body "$(cat <<EOF
+          ## Service Onboarding: $SERVICE_NAME
+
+          | Field | Value |
+          |---|---|
+          | Name | $SERVICE_NAME |
+          | Domain | $DOMAIN |
+          | Owner | $OWNER |
+          | Type | $TYPE |
+          | Exposure | $EXPOSURE |
+
+          ### Generated files
+          - \`k8s/services/$SERVICE_NAME/dev/values.yaml\`
+          - \`k8s/services/$SERVICE_NAME/staging/values.yaml\`
+          - \`k8s/services/$SERVICE_NAME/prod/values.yaml\`
+
+          ### Next steps
+          1. Edit values.yaml files (dependencies, secrets, resources)
+          2. Platform team reviews and approves
+          3. Merge -> ApplicationSet auto-discovers -> ArgoCD syncs
+          EOF
+          )" \
+            --head "onboard/$SERVICE_NAME" \
+            --base main \
+            --reviewer "$OWNER"
